@@ -1,203 +1,193 @@
 ##[Ps1 To Exe]
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::CursorVisible = $false
 
 # === 0. CHARGEMENT CONFIGURATION ===
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
 $ConfigFile = "$ScriptPath\config.json"
-if (Test-Path $ConfigFile) {
-    try {
-        $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-        Write-Host "Configuration chargée depuis config.json" -ForegroundColor Cyan
-    }
-    catch {
-        Write-Warning "Erreur lecture config.json, utilisation des valeurs par défaut."
-    }
-}
 
-# Valeurs par défaut (si config absente)
-if (-not $Config) {
-    $Config = @{
-        MaxBackupSizeGB     = 50
-        MaxBackupsToKeep    = 5
-        PrimaryDestination  = "E:\Sauvegarde Test"
-        FallbackDestination = "C:\Sauvegarde_Secours"
-        ProcessCheckList    = @("chrome", "firefox", "msedge", "brave", "outlook")
-    }
-}
-
-$MAX_SIZE_GB = $Config.MaxBackupSizeGB
-$MAX_SIZE_BYTES = $MAX_SIZE_GB * 1GB
-
-# Détection de l'utilisateur réel
 $explorer = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
 $loggedUser = $explorer.UserName.Split("\")[-1]
 if (-not $loggedUser) { $loggedUser = $env:USERNAME }
 $realUserProfile = "C:\Users\$loggedUser"
 
-$folders = @{
-    "Documents"       = "$realUserProfile\Documents"
-    "Images"          = "$realUserProfile\Pictures"
-    "Videos"          = "$realUserProfile\Videos"
-    "Bureau"          = "$realUserProfile\Desktop"
-    "Telechargements" = "$realUserProfile\Downloads"
-    "Signatures"      = "$realUserProfile\AppData\Roaming\Microsoft\Signatures"
+function Save-Config { param($ConfigObj) $ConfigObj | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile -Force }
+function Load-Config {
+    if (Test-Path $ConfigFile) {
+        try { return Get-Content $ConfigFile -Raw | ConvertFrom-Json } catch { return $null }
+    }; return $null
 }
 
-# Fonction pour vérifier les processus bloquants
-function Test-BlockingProcess {
-    param($ProcessNames)
-    $running = Get-Process -Name $ProcessNames -ErrorAction SilentlyContinue
-    if ($running) {
-        Add-Type -AssemblyName System.Windows.Forms
-        $result = [System.Windows.Forms.MessageBox]::Show(
-            "Les applications suivantes sont ouvertes et bloquent la sauvegarde :`n`n" + ($running.ProcessName -join ", ") + "`n`nVoulez-vous les fermer automatiquement ?",
-            "Processus bloquants détectés",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
+$DefaultFolders = [ordered]@{
+    "Documents"       = @{ Path = "$realUserProfile\Documents"; Enabled = $true }
+    "Images"          = @{ Path = "$realUserProfile\Pictures"; Enabled = $true }
+    "Videos"          = @{ Path = "$realUserProfile\Videos"; Enabled = $true }
+    "Bureau"          = @{ Path = "$realUserProfile\Desktop"; Enabled = $true }
+    "Telechargements" = @{ Path = "$realUserProfile\Downloads"; Enabled = $true }
+    "Signatures"      = @{ Path = "$realUserProfile\AppData\Roaming\Microsoft\Signatures"; Enabled = $true }
+}
 
-        if ($result -eq 'Yes') {
-            Stop-Process -Name $ProcessNames -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-        }
-        else {
-            Write-Host "ATTENTION : Si ces applications restent ouvertes, les mots de passe ne seront pas copiés." -ForegroundColor Red
-            Start-Sleep -Seconds 3
-        }
+$Config = Load-Config
+if (-not $Config) {
+    $Config = [PSCustomObject]@{
+        MaxBackupSizeGB     = 50
+        MaxBackupsToKeep    = 5
+        PrimaryDestination  = "E:\Sauvegarde Test"
+        FallbackDestination = "C:\Sauvegarde_Secours"
+        ProcessCheckList    = @("chrome", "firefox", "msedge", "brave", "outlook", "thunderbird")
+        SourceFolders       = $DefaultFolders
     }
+    Save-Config $Config
 }
 
-# Vérification avant analyse (depuis la config)
-Test-BlockingProcess -ProcessNames $Config.ProcessCheckList
-
-# === 2. ANALYSE ET TAILLE ===
-Write-Host "--- ANALYSE DU SYSTÈME POUR $loggedUser ---" -ForegroundColor Yellow
-Write-Host "Calcul de la taille totale... (Patientez)" -ForegroundColor Gray
-
-$allFiles = @()
-[long]$totalSize = 0
-foreach ($f in $folders.Keys) {
-    if (Test-Path $folders[$f]) {
-        $files = Get-ChildItem -Path $folders[$f] -Recurse -File -ErrorAction SilentlyContinue
-        $allFiles += $files
-        foreach ($file in $files) { $totalSize += $file.Length }
-    }
+# Nettoyage des dossiers (migration vers Hashtable propre)
+$cleanFolders = [ordered]@{}
+foreach ($p in $Config.SourceFolders.PSObject.Properties) {
+    if ($p.Name -match "Count|Keys|Values|SyncRoot|IsReadOnly|IsFixedSize|IsSynchronized") { continue }
+    if ($p.Value -is [string]) { $cleanFolders[$p.Name] = [PSCustomObject]@{ Path = $p.Value; Enabled = $true } }
+    else { $cleanFolders[$p.Name] = $p.Value }
 }
+if ($cleanFolders.Count -eq 0) { $cleanFolders = $DefaultFolders }
+$Config.SourceFolders = $cleanFolders
 
-$sizeGB = [Math]::Round($totalSize / 1GB, 2)
-if ($totalSize -gt $MAX_SIZE_BYTES) {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show("ALERTE : Taille ($sizeGB Go) > Limite ($MAX_SIZE_GB Go).`nSauvegarde annulée.", "Limite Dépassée", 0, 48)
-    exit
-}
+# === 1. LOGIQUE DE L'INTERFACE ===
+$selectedIndex = 0
 
-# === 3. CONFIRMATION ===
-Write-Host "`nVolume détecté : $sizeGB Go / $MAX_SIZE_GB Go" -ForegroundColor Cyan
-Write-Host "Appuyez sur [ENTRÉE] pour démarrer la sauvegarde..." -ForegroundColor Green
-$null = Read-Host
-
-# Choix Destination via Config
-# Choix Destination via Config
-$DefaultDest = if (Test-Path $Config.PrimaryDestination.Split("\")[0]) { $Config.PrimaryDestination } else { $Config.FallbackDestination }
-
-Write-Host "Destination par défaut : $DefaultDest" -ForegroundColor Gray
-$changeDest = Read-Host "Voulez-vous modifier le dossier de sauvegarde ? (O/N)"
-
-if ($changeDest -eq "O") {
-    Add-Type -AssemblyName System.Windows.Forms
-    $colordialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $colordialog.Description = "Sélectionnez le dossier de sauvegarde"
-    $colordialog.ShowNewFolderButton = $true
-    if ($colordialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $DestinationRoot = $colordialog.SelectedPath
-    }
-    else {
-        Write-Warning "Aucun dossier sélectionné. Utilisation de la destination par défaut."
-        $DestinationRoot = $DefaultDest
-    }
-}
-else {
-    $DestinationRoot = $DefaultDest
-}
-$timeStamp = (Get-Date).ToString("yyyy-MM-dd_HH-mm-ss")
-$dest = "$DestinationRoot\$timeStamp"
-
-# === 4. COPIE AVEC BARRE PRÉCISE ===
-$totalFilesCount = $allFiles.Count
-$currentFileIdx = 0
-
-foreach ($file in $allFiles) {
-    $currentFileIdx++
-    $percent = [int](($currentFileIdx / $totalFilesCount) * 100)
-    $visualBar = "#" * [int]($percent * 0.4) + "." * (40 - [int]($percent * 0.4))
-    Write-Host "`r  Sauvegarde : [$visualBar] $percent% ($currentFileIdx/$totalFilesCount)" -NoNewline -ForegroundColor Cyan
-
-    $relativePath = $file.DirectoryName.Replace($realUserProfile, "").TrimStart('\')
-    $targetDir = Join-Path $dest $relativePath
-    robocopy $file.DirectoryName $targetDir $file.Name /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
-}
-
-# === 5. NAVIGATEURS (FAVORIS ET PASS) ===
-Write-Host "`n`n>>> Sauvegarde des navigateurs..." -ForegroundColor Yellow
-$browserDest = "$dest\Browsers"
-
-function Backup-Chromium {
-    param($Path, $Name)
-    if (Test-Path $Path) {
-        $Profiles = Get-ChildItem $Path -Directory -Filter "Default*"
-        $Profiles += Get-ChildItem $Path -Directory -Filter "Profile*"
-        foreach ($p in $Profiles) {
-            $t = "$browserDest\$Name\$($p.Name)"
-            robocopy "$($p.FullName)" "$t" "Bookmarks" "Login Data" /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
-        }
-    }
-}
-
-Backup-Chromium -Path "$realUserProfile\AppData\Local\Google\Chrome\User Data" -Name "Chrome"
-Backup-Chromium -Path "$realUserProfile\AppData\Local\BraveSoftware\Brave-Browser\User Data" -Name "Brave"
-Backup-Chromium -Path "$realUserProfile\AppData\Local\Microsoft\Edge\User Data" -Name "Edge"
-
-# Firefox
-$ffPath = "$realUserProfile\AppData\Roaming\Mozilla\Firefox"
-if (Test-Path $ffPath) {
-    Write-Host "Sauvegarde complète du profil Firefox..." -ForegroundColor Yellow
-    # On copie tout le dossier Firefox (Profiles + profiles.ini) pour une restauration parfaite
-    # On exclut juste les caches pour gagner de la place
-    $ffDest = "$browserDest\Firefox"
-    robocopy "$ffPath" "$ffDest" /E /XD "Cache" "Caches" "OfflineCache" "startupCache" /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
-}
-
-# === 6. FOND D'ÉCRAN ===
-Write-Host "`n>>> Sauvegarde du fond d'écran..." -ForegroundColor Yellow
-$wallpaperDest = "$dest\Wallpaper"
-if (-not (Test-Path $wallpaperDest)) { New-Item -ItemType Directory -Path $wallpaperDest -Force | Out-Null }
-
-$wallpaperPath = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop').Wallpaper
-if (Test-Path $wallpaperPath) {
-    $wallpaperExt = [System.IO.Path]::GetExtension($wallpaperPath)
-    Copy-Item $wallpaperPath -Destination "$wallpaperDest\current_wallpaper$wallpaperExt" -Force
+function Get-MenuItems {
+    $items = @()
+    $items += @{ Type = "Action"; Key = "Start"; Label = " [ LANCER LA SAUVEGARDE ]"; Color = "Green" }
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Config"; Key = "PrimaryDestination";  Label = "Destination Primaire : "; Value = $Config.PrimaryDestination; ValueColor = "Cyan" }
+    $items += @{ Type = "Config"; Key = "FallbackDestination"; Label = "Destination Secours  : "; Value = $Config.FallbackDestination; ValueColor = "Cyan" }
+    $items += @{ Type = "Config"; Key = "MaxBackupSizeGB";     Label = "Limite de Taille     : "; Suffix = " Go"; Value = $Config.MaxBackupSizeGB }
+    $items += @{ Type = "Config"; Key = "MaxBackupsToKeep";    Label = "Versions à garder    : "; Value = $Config.MaxBackupsToKeep }
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Action"; Key = "AddFolder"; Label = " [+] Ajouter un nouveau dossier"; Color = "Cyan" }
     
-    $wallpaperSettings = @{
-        WallpaperStyle = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop').WallpaperStyle
-        TileWallpaper  = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop').TileWallpaper
+    foreach ($key in $Config.SourceFolders.Keys) {
+        $folder = $Config.SourceFolders[$key]
+        $status = if ($folder.Enabled) { "[X]" } else { "[ ]" }
+        $items += @{ Type = "Folder"; Key = $key; Label = " $status $key : $($folder.Path)"; Enabled = $folder.Enabled }
     }
-    $wallpaperSettings | ConvertTo-Json | Set-Content -Path "$wallpaperDest\wallpaper_settings.json"
+    
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Action"; Key = "Exit";  Label = " [ QUITTER ]"; Color = "Red" }
+    return $items
 }
 
-# === 7. NETTOYAGE (ROTATION) ===
-Write-Host "`n`n>>> Maintenance (Rotation des backups)..." -ForegroundColor Magenta
-$toKeep = $Config.MaxBackupsToKeep
-$backups = Get-ChildItem -Path $DestinationRoot -Directory | Sort-Object CreationTime -Descending
-
-if ($backups.Count -gt $toKeep) {
-    $toDelete = $backups | Select-Object -Skip $toKeep
-    foreach ($old in $toDelete) {
-        Write-Host "Suppression ancienne sauvegarde : $($old.Name)" -ForegroundColor DarkGray
-        Remove-Item $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+while ($true) {
+    $menuItems = Get-MenuItems
+    if ($selectedIndex -ge $menuItems.Count) { $selectedIndex = $menuItems.Count - 1 }
+    
+    [Console]::SetCursorPosition(0, 0)
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "         GESTIONNAIRE DE SAUVEGARDE" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    
+    for ($i = 0; $i -lt $menuItems.Count; $i++) {
+        $item = $menuItems[$i]
+        $isSel = ($i -eq $selectedIndex)
+        $prefix = if ($isSel) { "> " } else { "  " }
+        
+        if ($item.Type -eq "Separator") {
+            Write-Host "  $($item.Label)" -ForegroundColor Gray
+            continue
+        }
+        
+        $fg = "White"; $bg = "Black"
+        if ($isSel) { $fg = "Black"; $bg = "White" }
+        elseif ($item.Color) { $fg = $item.Color }
+        elseif ($item.Type -eq "Folder" -and -not $item.Enabled) { $fg = "DarkGray" }
+        
+        # Affichage spécial avec couleurs mélangées si non sélectionné
+        if (-not $isSel -and $item.ValueColor -and $item.Value) {
+            Write-Host "$prefix$($item.Label)" -NoNewline -ForegroundColor $fg
+            Write-Host "$($item.Value)" -ForegroundColor $item.ValueColor
+        } else {
+            $lineText = "$prefix$($item.Label)$($item.Value)$($item.Suffix)"
+            if ($lineText.Length -gt 47) { $lineText = $lineText.Substring(0, 44) + "..." }
+            Write-Host $lineText.PadRight(47) -ForegroundColor $fg -BackgroundColor $bg
+        }
+    }
+    
+    Write-Host "`n-----------------------------------------------" -ForegroundColor Gray
+    Write-Host " [↑/↓]: Naviguer  [Entrée]: Agir/Basculer  [Q]: Quitter" -ForegroundColor Gray
+    
+    $key = [Console]::ReadKey($true)
+    if ($key.Key -eq "UpArrow") { 
+        $selectedIndex = if ($selectedIndex -gt 0) { $selectedIndex - 1 } else { $menuItems.Count - 1 }
+        while ($menuItems[$selectedIndex].Type -eq "Separator") { $selectedIndex = if ($selectedIndex -gt 0) { $selectedIndex - 1 } else { $menuItems.Count - 1 } }
+    }
+    elseif ($key.Key -eq "DownArrow") { 
+        $selectedIndex = if ($selectedIndex -lt $menuItems.Count - 1) { $selectedIndex + 1 } else { 0 }
+        while ($menuItems[$selectedIndex].Type -eq "Separator") { $selectedIndex = if ($selectedIndex -lt $menuItems.Count - 1) { $selectedIndex + 1 } else { 0 } }
+    }
+    elseif ($key.Key -eq "Q") { [Console]::CursorVisible = $true; exit }
+    elseif ($key.Key -eq "Enter") {
+        $selectedItem = $menuItems[$selectedIndex]
+        if ($selectedItem.Key -eq "Start") { break }
+        if ($selectedItem.Key -eq "Exit") { [Console]::CursorVisible = $true; exit }
+        if ($selectedItem.Type -eq "Config") {
+            if ($selectedItem.Key -match "Destination") {
+                Add-Type -AssemblyName System.Windows.Forms; $fd = New-Object System.Windows.Forms.FolderBrowserDialog
+                if ($fd.ShowDialog() -eq "OK") { $Config.$($selectedItem.Key) = $fd.SelectedPath; Save-Config $Config }
+            } else {
+                [Console]::CursorVisible = $true
+                [Console]::SetCursorPosition($selectedItem.Label.Length + 2, $selectedIndex + 3)
+                Write-Host "      " -NoNewline -BackgroundColor White
+                [Console]::SetCursorPosition($selectedItem.Label.Length + 2, $selectedIndex + 3)
+                $val = Read-Host
+                if ($val -match "^\d+$") { $Config.$($selectedItem.Key) = [int]$val; Save-Config $Config }
+                [Console]::CursorVisible = $false
+            }
+        }
+        elseif ($selectedItem.Key -eq "AddFolder") {
+            [Console]::CursorVisible = $true; Clear-Host
+            $name = Read-Host "Nom du dossier"; Add-Type -AssemblyName System.Windows.Forms; $fd = New-Object System.Windows.Forms.FolderBrowserDialog
+            if ($fd.ShowDialog() -eq "OK") { $Config.SourceFolders[$name] = @{ Path = $fd.SelectedPath; Enabled = $true }; Save-Config $Config }
+            [Console]::CursorVisible = $false; Clear-Host
+        }
+        elseif ($selectedItem.Type -eq "Folder") {
+            $Config.SourceFolders[$selectedItem.Key].Enabled = -not $Config.SourceFolders[$selectedItem.Key].Enabled
+            Save-Config $Config
+        }
     }
 }
 
-Write-Host "`n===============================================" -ForegroundColor Green
-Write-Host "SAUVEGARDE TERMINÉE DANS : $dest"
-Write-Host "===============================================" -ForegroundColor Green
+# === 2. EXECUTION ===
+[Console]::CursorVisible = $true; Clear-Host
+Write-Host "--- PRÉPARATION DE LA SAUVEGARDE ---" -ForegroundColor Cyan
+$folders = [ordered]@{}
+foreach ($key in $Config.SourceFolders.Keys) {
+    if ($Config.SourceFolders[$key].Enabled) { $folders[$key] = $Config.SourceFolders[$key].Path }
+}
+Write-Host "Analyse des dossiers..." -ForegroundColor Gray
+[long]$totalSize = 0
+foreach ($path in $folders.Values) { if (Test-Path $path) { $size = (Get-ChildItem $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if ($size) { $totalSize += $size } } }
+$sizeGB = [Math]::Round($totalSize / 1GB, 2)
+if ($totalSize -gt ($Config.MaxBackupSizeGB * 1GB)) { Write-Host "ERREUR : Taille ($sizeGB Go) > Limite ($($Config.MaxBackupSizeGB) Go)." -ForegroundColor Red; pause; exit }
+$DestRoot = if (Test-Path $Config.PrimaryDestination.Split("\")[0]) { $Config.PrimaryDestination } else { $Config.FallbackDestination }
+$dest = "$DestRoot\$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss'))"
+New-Item $dest -ItemType Directory -Force | Out-Null
+Write-Host "`n>>> Copie vers $dest..." -ForegroundColor Yellow
+foreach ($folderName in $folders.Keys) {
+    Write-Host " - $folderName" -ForegroundColor Gray
+    robocopy "$($folders[$folderName])" "$dest\$folderName" /E /MT:16 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS /XD Cache Caches .git node_modules /LOG+:"$dest\backup.log"
+}
+$browserDest = "$dest\Browsers"
+function Backup-Chromium { param($Path, $Name) if (Test-Path $Path) { $found = Get-ChildItem $Path -Directory -Filter "Profile*"; if (Test-Path "$Path\Default") { $found += Get-Item "$Path\Default" }; foreach ($p in $found) { robocopy "$($p.FullName)" "$browserDest\$Name\$($p.Name)" "Bookmarks" "Login Data" /R:1 /W:1 /NP /NFL /NDL /NJH /NJS /LOG+:"$dest\backup.log" } } }
+Backup-Chromium -Path "$realUserProfile\AppData\Local\Google\Chrome\User Data" -Name "Chrome"
+Backup-Chromium -Path "$realUserProfile\AppData\Local\Microsoft\Edge\User Data" -Name "Edge"
+Backup-Chromium -Path "$realUserProfile\AppData\Local\BraveSoftware\Brave-Browser\User Data" -Name "Brave"
+robocopy "$realUserProfile\AppData\Roaming\Mozilla\Firefox" "$browserDest\Firefox" /E /MT:8 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS /XD Cache Caches /LOG+:"$dest\backup.log"
+robocopy "$realUserProfile\AppData\Roaming\Thunderbird" "$browserDest\Thunderbird" /E /MT:8 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS /XD Cache Caches /LOG+:"$dest\backup.log"
+if (Test-Path (Get-ItemProperty 'HKCU:\Control Panel\Desktop').Wallpaper) { 
+    New-Item "$dest\Wallpaper" -ItemType Directory -Force | Out-Null
+    Copy-Item (Get-ItemProperty 'HKCU:\Control Panel\Desktop').Wallpaper "$dest\Wallpaper\current_wallpaper.jpg" -Force 
+    # AJOUT DE LA SAUVEGARDE DES PARAMÈTRES
+    Get-ItemProperty 'HKCU:\Control Panel\Desktop' | Select-Object WallpaperStyle, TileWallpaper | ConvertTo-Json | Set-Content "$dest\Wallpaper\wallpaper_settings.json" -Force
+}
+Copy-Item "$ScriptPath\restore.ps1", "$ScriptPath\restore.bat", "$ScriptPath\config.json" -Destination $dest -Force
+Get-ChildItem $DestRoot -Directory | Sort-Object CreationTime -Descending | Select-Object -Skip $Config.MaxBackupsToKeep | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "`nSAUVEGARDE TERMINÉE !" -ForegroundColor Green
 pause

@@ -1,151 +1,196 @@
+##[Ps1 To Exe]
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::CursorVisible = $false
 
 # === 0. CHARGEMENT CONFIGURATION ===
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
-$MAX_SIZE_GB = 50 # Valeur défaut
 $ConfigFile = "$ScriptPath\config.json"
-if (Test-Path $ConfigFile) {
-    try {
-        $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-        if ($Config.MaxBackupSizeGB) { $MAX_SIZE_GB = $Config.MaxBackupSizeGB }
-        Write-Host "Configuration chargée (Limite : $MAX_SIZE_GB Go)" -ForegroundColor Cyan
-    }
-    catch {
-        Write-Warning "Erreur lecture config.json, utilisation valeur défaut ($MAX_SIZE_GB Go)."
-    }
-}
 
-# === 1. CHOIX DU DOSSIER SOURCE ===
-$SourceRoot = $ScriptPath
-Write-Host "Dossier actuel : $SourceRoot" -ForegroundColor Gray
-$choice = Read-Host "Utiliser ce dossier comme source ? (O/N)"
-if ($choice -eq "N") {
-    Write-Host "Source actuelle : $SourceRoot" -ForegroundColor Gray
-    $changeSrc = Read-Host "Voulez-vous sélectionner un autre dossier de sauvegarde à restaurer ? (O/N)"
-    
-    if ($changeSrc -eq "O") {
-        Add-Type -AssemblyName System.Windows.Forms
-        $colordialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $colordialog.Description = "Sélectionnez le dossier contenant les sauvegardes"
-        $colordialog.ShowNewFolderButton = $false
-        
-        if ($colordialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $SourceRoot = $colordialog.SelectedPath
-        }
-        else {
-            $SourceRoot = Read-Host "Aucune sélection. Entrez le chemin complet manuellement"
-        }
-    }
-    else {
-        $SourceRoot = Read-Host "Entrez le chemin complet du dossier de sauvegarde"
-    }
-}
-
-if (-not (Test-Path $SourceRoot)) { Write-Error "Dossier introuvable."; pause; exit }
-
-# === 2. ANALYSE ET TAILLE ===
-$MAX_SIZE_BYTES = $MAX_SIZE_GB * 1GB
-Write-Host "`nAnalyse du contenu... (Patientez)" -ForegroundColor Gray
-
-$allFiles = Get-ChildItem -Path $SourceRoot -Recurse -File -Exclude "Restore.ps1", "*.bat"
-[long]$totalSize = 0
-foreach ($f in $allFiles) { $totalSize += $f.Length }
-$sizeGB = [Math]::Round($totalSize / 1GB, 2)
-
-if ($totalSize -gt $MAX_SIZE_BYTES) {
-    Write-Host "ERREUR : Backup trop lourd ($sizeGB Go)." -ForegroundColor Red; pause; exit
-}
-
-# Détection utilisateur
 $explorer = Get-Process explorer -IncludeUserName -ErrorAction SilentlyContinue | Select-Object -First 1
 $loggedUser = $explorer.UserName.Split("\")[-1]
+if (-not $loggedUser) { $loggedUser = $env:USERNAME }
 $realUserProfile = "C:\Users\$loggedUser"
 
-Write-Host "`nPrêt à restaurer $sizeGB Go pour $loggedUser." -ForegroundColor Cyan
-Write-Host "Appuyez sur [ENTRÉE] pour démarrer..." -ForegroundColor Green
-$null = Read-Host
-
-# === 3. RESTAURATION FICHIERS ===
-$totalFiles = $allFiles.Count
-$idx = 0
-
-foreach ($file in $allFiles) {
-    if ($file.FullName -like "*\Browsers\*") { continue } # On traite les navigateurs après
-    $idx++
-    $percent = [int](($idx / $totalFiles) * 100)
-    $visualBar = "#" * [int]($percent * 0.4) + "." * (40 - [int]($percent * 0.4))
-    Write-Host "`r  Restauration : [$visualBar] $percent% ($idx/$totalFiles)" -NoNewline -ForegroundColor Green
-
-    $targetDir = $file.DirectoryName.Replace($SourceRoot, $realUserProfile)
-    robocopy $file.DirectoryName $targetDir $file.Name /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
+function Load-Config {
+    if (Test-Path $ConfigFile) {
+        try { return Get-Content $ConfigFile -Raw | ConvertFrom-Json } catch { return $null }
+    }; return $null
 }
 
-# === 4. RESTAURATION NAVIGATEURS ===
-Write-Host "`n`n>>> Restauration des favoris et mots de passe..." -ForegroundColor Yellow
-$browserSrc = "$SourceRoot\Browsers"
+$Config = Load-Config
+if (-not $Config) { $Config = @{ PrimaryDestination = "E:\Sauvegarde Test"; FallbackDestination = "C:\Sauvegarde_Secours" } }
 
-function Restore-Chromium {
-    param($Name, $Path)
-    if (Test-Path "$browserSrc\$Name") {
-        foreach ($p in (Get-ChildItem "$browserSrc\$Name" -Directory)) {
-            $target = "$Path\$($p.Name)"
-            if (-not (Test-Path $target)) { New-Item -Path $target -ItemType Directory -Force | Out-Null }
-            robocopy "$($p.FullName)" "$target" "Bookmarks" "Login Data" /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
+# Détection automatique de la source (dernière sauvegarde)
+$DestRoot = if (Test-Path $Config.PrimaryDestination.Split("\")[0]) { $Config.PrimaryDestination } else { $Config.FallbackDestination }
+$SourceRoot = $ScriptPath
+
+# Si on n'est pas déjà dans un dossier de backup, on cherche le plus récent
+if (-not (Test-Path "$SourceRoot\Browsers") -and -not (Test-Path "$SourceRoot\Documents")) {
+    if (Test-Path $DestRoot) {
+        $last = Get-ChildItem $DestRoot -Directory | Sort-Object CreationTime -Descending | Select-Object -First 1
+        if ($last) { $SourceRoot = $last.FullName }
+    }
+}
+
+# === 1. LOGIQUE DE L'INTERFACE RESTORE ===
+$selectedIndex = 0
+$restoreOptions = [ordered]@{
+    "Files"     = @{ Label = "Documents et Fichiers"; Enabled = $true; Found = $false }
+    "Browsers"  = @{ Label = "Profils Navigateurs (Chrome, Firefox...)"; Enabled = $true; Found = $false }
+    "Wallpaper" = @{ Label = "Fond d'écran et Personnalisation"; Enabled = $true; Found = $false }
+}
+
+function Update-FoundItems {
+    $restoreOptions.Files.Found = (Get-ChildItem $SourceRoot -Directory | Where-Object { $_.Name -notin @("Browsers", "Wallpaper") }).Count -gt 0
+    $restoreOptions.Browsers.Found = Test-Path "$SourceRoot\Browsers"
+    $restoreOptions.Wallpaper.Found = Test-Path "$SourceRoot\Wallpaper"
+}
+
+function Get-MenuItems {
+    $items = @()
+    $items += @{ Type = "Action"; Key = "Start"; Label = " [ LANCER LA RESTAURATION ]"; Color = "Green" }
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Config"; Key = "Source"; Label = "Dossier Source : "; Value = $SourceRoot; ValueColor = "Cyan" }
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Header"; Label = "[ ÉLÉMENTS À RESTAURER ]" }
+    
+    foreach ($key in $restoreOptions.Keys) {
+        $opt = $restoreOptions[$key]
+        if ($opt.Found) {
+            $status = if ($opt.Enabled) { "[X]" } else { "[ ]" }
+            $items += @{ Type = "Toggle"; Key = $key; Label = " $status $($opt.Label)"; Enabled = $opt.Enabled }
+        } else {
+            $items += @{ Type = "Info"; Label = " [ ] $($opt.Label) (Non trouvé)"; Color = "DarkGray" }
+        }
+    }
+    
+    $items += @{ Type = "Separator"; Label = "-----------------------------------------------" }
+    $items += @{ Type = "Action"; Key = "Exit"; Label = " [ QUITTER ]"; Color = "Red" }
+    return $items
+}
+
+while ($true) {
+    Update-FoundItems
+    $menuItems = Get-MenuItems
+    if ($selectedIndex -ge $menuItems.Count) { $selectedIndex = $menuItems.Count - 1 }
+    
+    [Console]::SetCursorPosition(0, 0)
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "        GESTIONNAIRE DE RESTAURATION" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    
+    for ($i = 0; $i -lt $menuItems.Count; $i++) {
+        $item = $menuItems[$i]
+        $isSel = ($i -eq $selectedIndex)
+        $prefix = if ($isSel) { "> " } else { "  " }
+        
+        if ($item.Type -eq "Separator" -or $item.Type -eq "Header") {
+            Write-Host "  $($item.Label)" -ForegroundColor Gray
+            continue
+        }
+        
+        $fg = "White"; $bg = "Black"
+        if ($isSel) { $fg = "Black"; $bg = "White" }
+        elseif ($item.Color) { $fg = $item.Color }
+        elseif ($item.Type -eq "Info") { $fg = "DarkGray" }
+        
+        if (-not $isSel -and $item.ValueColor) {
+            Write-Host "$prefix$($item.Label)" -NoNewline -ForegroundColor $fg
+            Write-Host "$($item.Value)" -ForegroundColor $item.ValueColor
+        } else {
+            $lineText = "$prefix$($item.Label)$($item.Value)"
+            if ($lineText.Length -gt 47) { $lineText = $lineText.Substring(0, 44) + "..." }
+            Write-Host $lineText.PadRight(47) -ForegroundColor $fg -BackgroundColor $bg
+        }
+    }
+    
+    Write-Host "`n-----------------------------------------------" -ForegroundColor Gray
+    Write-Host " [↑/↓]: Naviguer  [Entrée]: Agir/Basculer  [Q]: Quitter" -ForegroundColor Gray
+    
+    $key = [Console]::ReadKey($true)
+    if ($key.Key -eq "UpArrow") { 
+        $selectedIndex = if ($selectedIndex -gt 0) { $selectedIndex - 1 } else { $menuItems.Count - 1 }
+        while ($menuItems[$selectedIndex].Type -in @("Separator", "Header", "Info")) { $selectedIndex = if ($selectedIndex -gt 0) { $selectedIndex - 1 } else { $menuItems.Count - 1 } }
+    }
+    elseif ($key.Key -eq "DownArrow") { 
+        $selectedIndex = if ($selectedIndex -lt $menuItems.Count - 1) { $selectedIndex + 1 } else { 0 }
+        while ($menuItems[$selectedIndex].Type -in @("Separator", "Header", "Info")) { $selectedIndex = if ($selectedIndex -lt $menuItems.Count - 1) { $selectedIndex + 1 } else { 0 } }
+    }
+    elseif ($key.Key -eq "Q") { [Console]::CursorVisible = $true; exit }
+    elseif ($key.Key -eq "Enter") {
+        $selectedItem = $menuItems[$selectedIndex]
+        if ($selectedItem.Key -eq "Start") { break }
+        if ($selectedItem.Key -eq "Exit") { [Console]::CursorVisible = $true; exit }
+        if ($selectedItem.Key -eq "Source") {
+            Add-Type -AssemblyName System.Windows.Forms; $fd = New-Object System.Windows.Forms.FolderBrowserDialog
+            $fd.Description = "Sélectionnez le dossier de sauvegarde à restaurer"
+            if ($fd.ShowDialog() -eq "OK") { $SourceRoot = $fd.SelectedPath }
+        }
+        elseif ($selectedItem.Type -eq "Toggle") {
+            $restoreOptions[$selectedItem.Key].Enabled = -not $restoreOptions[$selectedItem.Key].Enabled
         }
     }
 }
 
-Restore-Chromium -Name "Chrome" -Path "$realUserProfile\AppData\Local\Google\Chrome\User Data"
-Restore-Chromium -Name "Brave"  -Path "$realUserProfile\AppData\Local\BraveSoftware\Brave-Browser\User Data"
-Restore-Chromium -Name "Edge"   -Path "$realUserProfile\AppData\Local\Microsoft\Edge\User Data"
+# === 2. EXECUTION DE LA RESTAURATION ===
+[Console]::CursorVisible = $true; Clear-Host
+Write-Host "--- DÉMARRAGE DE LA RESTAURATION ---" -ForegroundColor Cyan
+Write-Host "Source : $SourceRoot" -ForegroundColor Gray
 
-# Firefox
-# Nouvelle logique : Restauration complète ou rien
-$ffBackup = "$browserSrc\Firefox"
-if (Test-Path $ffBackup) {
-    Write-Host "Restauration du profil complet Firefox..." -ForegroundColor Yellow
-    $ffLocal = "$realUserProfile\AppData\Roaming\Mozilla\Firefox"
-    
-    # On écrase proprement pour éviter les conflits de profils
-    if (Test-Path $ffLocal) {
-        Remove-Item $ffLocal -Recurse -Force -ErrorAction SilentlyContinue
+# Fichiers
+if ($restoreOptions.Files.Enabled -and $restoreOptions.Files.Found) {
+    Write-Host "`nRestaurations des dossiers personnels..." -ForegroundColor Yellow
+    Get-ChildItem $SourceRoot -Directory | Where-Object { $_.Name -notin @("Browsers", "Wallpaper") } | foreach {
+        Write-Host " - $($_.Name)" -ForegroundColor Gray
+        robocopy "$($_.FullName)" "$realUserProfile\$($_.Name)" /E /MT:16 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS
     }
-    New-Item -Path $ffLocal -ItemType Directory -Force | Out-Null
+}
+
+# Navigateurs
+if ($restoreOptions.Browsers.Enabled -and $restoreOptions.Browsers.Found) {
+    Write-Host "`nRestaurations des navigateurs..." -ForegroundColor Yellow
+    $bSrc = "$SourceRoot\Browsers"
     
-    robocopy "$ffBackup" "$ffLocal" /E /R:1 /W:1 /NP /NFL /NDL /NJH /NJS > $null
+    # Chrome/Edge/Brave (Favoris/Pass)
+    function Restore-Chromium {
+        param($Name, $Path)
+        if (Test-Path "$bSrc\$Name") {
+            Write-Host " - $Name" -ForegroundColor Gray
+            Get-ChildItem "$bSrc\$Name" -Directory | foreach {
+                robocopy "$($_.FullName)" "$Path\$($_.Name)" "Bookmarks" "Login Data" /R:1 /W:1 /NP /NFL /NDL /NJH /NJS
+            }
+        }
+    }
+    Restore-Chromium "Chrome" "$realUserProfile\AppData\Local\Google\Chrome\User Data"
+    Restore-Chromium "Edge"   "$realUserProfile\AppData\Local\Microsoft\Edge\User Data"
+    Restore-Chromium "Brave"  "$realUserProfile\AppData\Local\BraveSoftware\Brave-Browser\User Data"
+    
+    # Firefox & Thunderbird (Complets)
+    if (Test-Path "$bSrc\Firefox") { Write-Host " - Firefox"; robocopy "$bSrc\Firefox" "$realUserProfile\AppData\Roaming\Mozilla\Firefox" /E /MT:8 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS }
+    if (Test-Path "$bSrc\Thunderbird") { Write-Host " - Thunderbird"; robocopy "$bSrc\Thunderbird" "$realUserProfile\AppData\Roaming\Thunderbird" /E /MT:8 /R:1 /W:1 /NP /NFL /NDL /NJH /NJS }
 }
 
-# === 5. RESTAURATION FOND D'ÉCRAN ===
-$wallpaperSrc = "$SourceRoot\Wallpaper"
-if (Test-Path $wallpaperSrc) {
-    Write-Host "`n>>> Restauration du fond d'écran..." -ForegroundColor Yellow
-    $wallpaperFile = Get-ChildItem "$wallpaperSrc\current_wallpaper.*" | Select-Object -First 1
-    $settingsFile = "$wallpaperSrc\wallpaper_settings.json"
-
-    if ($wallpaperFile -and (Test-Path $settingsFile)) {
-        $destPath = "$realUserProfile\AppData\Local\Microsoft\Windows\Themes\RestoredWallpaper$($wallpaperFile.Extension)"
-        if (-not (Test-Path (Split-Path $destPath))) { New-Item -ItemType Directory -Path (Split-Path $destPath) -Force | Out-Null }
-        Copy-Item $wallpaperFile.FullName -Destination $destPath -Force
-
-        $settings = Get-Content $settingsFile | ConvertFrom-Json
-        Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value $settings.WallpaperStyle
-        Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value $settings.TileWallpaper
-        Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Value $destPath
-
-        # Forcer le rafraîchissement immédiat via l'API Windows
-        $code = @'
-using System.Runtime.InteropServices;
-public class Wallpaper {
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
-}
-'@
+# Wallpaper
+if ($restoreOptions.Wallpaper.Enabled -and $restoreOptions.Wallpaper.Found) {
+    Write-Host "`nRestauration du fond d'écran..." -ForegroundColor Yellow
+    $wpFile = Get-ChildItem "$SourceRoot\Wallpaper\current_wallpaper.*" | Select-Object -First 1
+    if ($wpFile) {
+        $destWp = "$realUserProfile\AppData\Local\Microsoft\Windows\Themes\RestoredWallpaper$($wpFile.Extension)"
+        if (-not (Test-Path (Split-Path $destWp))) { New-Item (Split-Path $destWp) -ItemType Directory -Force | Out-Null }
+        Copy-Item $wpFile.FullName $destWp -Force
+        
+        if (Test-Path "$SourceRoot\Wallpaper\wallpaper_settings.json") {
+            $set = Get-Content "$SourceRoot\Wallpaper\wallpaper_settings.json" | ConvertFrom-Json
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value $set.WallpaperStyle
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name TileWallpaper -Value $set.TileWallpaper
+        }
+        Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Value $destWp
+        
+        $code = 'using System.Runtime.InteropServices; public class Wp { [DllImport("user32.dll")] public static extern int SystemParametersInfo(int u, int p, string v, int f); }'
         Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-        [Wallpaper]::SystemParametersInfo(20, 0, $destPath, 3) | Out-Null
+        [Wp]::SystemParametersInfo(20, 0, $destWp, 3) | Out-Null
     }
 }
 
-Write-Host "`n===============================================" -ForegroundColor Green
-Write-Host "RESTAURATION TERMINÉE."
-Write-Host "===============================================" -ForegroundColor Green
+Write-Host "`nRESTAURATION TERMINÉE !" -ForegroundColor Green
 pause

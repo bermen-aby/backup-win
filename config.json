@@ -1,14 +1,36 @@
 {
-    "MaxBackupSizeGB": 50,
-    "MaxBackupsToKeep": 5,
-    "PrimaryDestination": "E:\\Sauvegarde Test",
-    "FallbackDestination": "C:\\Sauvegarde_Secours",
-    "ProcessCheckList": [
-        "chrome",
-        "firefox",
-        "msedge",
-        "brave",
-        "outlook",
-        "thunderbird"
-    ]
+    "MaxBackupSizeGB":  15,
+    "MaxBackupsToKeep":  8,
+    "PrimaryDestination":  "E:\\Sauvegarde Test",
+    "FallbackDestination":  "C:\\Sauvegarde_Secours",
+    "ProcessCheckList":  [
+                             "chrome",
+                             "firefox",
+                             "msedge",
+                             "brave",
+                             "outlook",
+                             "thunderbird"
+                         ],
+    "SourceFolders":  {
+                          "Images":  {
+                                         "Path":  "C:\\Users\\Bermen\\Pictures",
+                                         "Enabled":  false
+                                     },
+                          "Videos":  {
+                                         "Path":  "C:\\Users\\Bermen\\Videos",
+                                         "Enabled":  false
+                                     },
+                          "Bureau":  {
+                                         "Path":  "C:\\Users\\Bermen\\Desktop",
+                                         "Enabled":  true
+                                     },
+                          "Telechargements":  {
+                                                  "Path":  "C:\\Users\\Bermen\\Downloads",
+                                                  "Enabled":  false
+                                              },
+                          "Signatures":  {
+                                             "Path":  "C:\\Users\\Bermen\\AppData\\Roaming\\Microsoft\\Signatures",
+                                             "Enabled":  true
+                                         }
+                      }
 }

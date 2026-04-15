@@ -1,90 +1,76 @@
 # 📑 Guide d'Utilisation : Système de Sauvegarde & Restauration Automatisé
 
-Ce système professionnel, basé sur PowerShell et Robocopy, permet la sauvegarde et la restauration rapide et sécurisée de vos données personnelles et profils de navigateurs.
+Ce système professionnel permet la sauvegarde, la gestion et la restauration ultra-rapide de vos données personnelles et profils d'applications.
 
 ---
 
 ## 🚀 Démarrage Rapide
 
-**Double-cliquez simplement sur le fichier `.bat` correspondant à votre besoin :**
-
-1.  🟢 **Pour SAUVEGARDER** : Lancez `backup.bat`
-2.  🔵 **Pour RESTAURER** : Lancez `restore.bat`
-
-> [!IMPORTANT]
-> Utilisez toujours les fichiers **.bat**. N'exécutez pas directement les fichiers `.ps1`, car les `.bat` gèrent automatiquement les droits administrateur et les problèmes d'affichage des accents.
+1.  🟢 **SAUVEGARDER** : Lancez `backup.bat`.
+2.  🔵 **RESTAURER** : Lancez `restore.bat` (soit à la racine, soit dans un dossier de sauvegarde).
+3.  ⚙️ **GÉRER** : Lancez `manage.bat` pour voir, calculer la taille ou supprimer vos archives.
 
 ---
 
-## 🆕 Nouveautés (Mise à jour)
+## 📂 Ce qui est sauvegardé
 
-*   **Sélection de Dossier Interactive** : Plus besoin de modifier les scripts manuellement !
-    *   Lors de la sauvegarde, vous pouvez choisir **n'importe quel dossier ou disque** comme destination via une fenêtre de dialogue.
-    *   Lors de la restauration, vous pouvez naviguer pour sélectionner exactement le dossier contenant vos sauvegardes.
-*   **Support des Accents** : Les scripts affichent désormais correctement les caractères accentués (`é`, `à`, `ê`) dans la console.
-*   **Configuration Centralisée** : Un fichier `config.json` permet de régler les paramètres sans toucher au code.
+Le script cible intelligemment les données les plus importantes pour une migration ou une sauvegarde complète :
 
----
+### 1. Dossiers Personnels
+*   📁 **Documents**, **Images**, **Vidéos**, **Bureau**, **Téléchargements**.
 
-## ⚙️ Fonctionnement Détaillé
+### 2. Messagerie & Bureautique
+*   📧 **Thunderbird** : Sauvegarde complète du profil (emails, comptes, carnets d'adresses).
+*   ✉️ **Outlook** : Sauvegarde des **Signatures** (les fichiers `.pst` ne sont pas inclus par défaut car souvent trop lourds, utilisez l'export Outlook pour les mails).
 
-### 1. Sauvegarde (`backup.bat`)
+### 3. Navigateurs Web
+*   🌐 **Chrome, Edge, Brave** : Sauvegarde des **Favoris** (Bookmarks) et des **Mots de passe** (Login Data).
+*   🦊 **Firefox** : Sauvegarde **complète du profil** (extensions, historique, thèmes, mots de passe).
 
-Le script effectue les actions suivantes :
-1.  **Vérification des Processus** : Détecte si vos navigateurs (Chrome, Firefox, Edge, etc.) ou Outlook sont ouverts et propose de les fermer pour garantir la sauvegarde des fichiers verrouillés (mots de passe, emails).
-2.  **Calcul de Taille** : Estime le volume total des données. Si la taille dépasse la limite configurée (50 Go par défaut), la sauvegarde est annulée par sécurité.
-3.  **Choix de la Destination** :
-    *   Utilise par défaut le chemin défini dans la configuration.
-    *   Vous propose de **choisir un autre dossier** via une fenêtre explorateur si vous le souhaitez.
-4.  **Copie Robuste** : Utilise *Robocopy* avec une barre de progression visuelle pour copier :
-    *   📂- **Documents, Images, Vidéos, Bureau, Téléchargements**.
-- **Signatures Outlook**.
-- **Navigateurs** (Favoris et mots de passe pour Chrome, Brave, Edge, Firefox).
-- **Fond d'écran Windows** (Image et positionnement).
-- **Maintenance automatique** (Garde les 5 dernières sauvegardes). les plus anciennes pour n'en garder que les X dernières (5 par défaut).
-5.  **Rotation (Nettoyage)** : Supprime automatiquement les sauvegardes les plus anciennes pour n'en garder que les X dernières (5 par défaut).
-
-### 2. Restauration (`restore.bat`)
-
-Le script restaure vos données intelligemment :
-1.  **Choix de la Source** :
-    *   Détecte automatiquement si le script est lancé depuis un dossier de sauvegarde.
-    *   Sinon, vous permet de **parcourir vos disques** pour sélectionner le dossier source.
-2.  **Réinjection des Données** : Replace les fichiers exactement là où ils doivent être (`C:\Users\VotreNom\...`).
-3.  **Restauration des Navigateurs** :
-    *   Réinjecte les favoris et mots de passe.
-    *   Pour **Firefox**, restaure le profil complet (extensions, historique, etc.).
+### 4. Personnalisation Windows
+*   🖼️ **Fond d'écran** : L'image actuelle et ses réglages de positionnement sont conservés et réappliqués.
 
 ---
 
-## 🔧 Configuration (`config.json`)
+## ⚙️ Configuration (`config.json`)
 
-Vous pouvez personnaliser le comportement du système en modifiant le fichier `config.json` avec le Bloc-notes :
+Vous pouvez personnaliser le comportement du système en modifiant le fichier `config.json` avec le Bloc-notes. Voici la signification de chaque réglage :
 
 ```json
 {
-    "MaxBackupSizeGB": 50,           // Limite de taille en Go (sécurité)
-    "MaxBackupsToKeep": 5,           // Nombre de versions à conserver
-    "PrimaryDestination": "E:\\Sauv", // Dossier par défaut (disque externe)
-    "FallbackDestination": "C:\\Secours", // Dossier de secours
-    "ProcessCheckList": [            // Logiciels à fermer avant sauvegarde
-        "chrome", "firefox", "outlook"
+    "MaxBackupSizeGB": 50,           // Limite de sécurité en Go. Si vos données dépassent ce seuil, le backup s'arrête.
+    "MaxBackupsToKeep": 5,           // Nombre de versions à garder sur votre disque. La plus ancienne est supprimée à la 6ème.
+    "PrimaryDestination": "E:\\Sauv", // Votre disque dur externe ou clé USB (utilisez des doubles antislashs \\).
+    "FallbackDestination": "C:\\Secours", // Dossier utilisé si votre disque externe n'est pas branché.
+    "ProcessCheckList": [            // Liste des logiciels que le script proposera de fermer (pour déverrouiller les fichiers).
+        "chrome", "firefox", "msedge", "brave", "outlook", "thunderbird"
     ]
 }
 ```
 
 ---
 
-## 📂 Structure Recommandée
+## 🔵 Comment Restaurer ?
 
-Pour une organisation optimale sur votre disque externe :
+### Restauration Totale
+Lancez `restore.bat`. Le script détectera l'utilisateur actuel et replacera chaque fichier exactement à sa place d'origine (`C:\Users\VotreNom\...`).
 
-```text
-📁 E:\Mes Sauvegardes\
- ┣ 📁 2024-01-28_14-00-00\     <-- Dossier créé par le script
- ┃  ┣ 📁 Browsers              <-- Données navigateurs
- ┃  ┣ 📁 Documents             <-- Vos fichiers
- ┃  ┣ ...
- ┃  ┣ 📜 Restore.ps1           <-- Copié automatiquement ici
- ┃  ┗ ⚙️ restore.bat           <-- Copié automatiquement ici
-```
+### Restauration Sélective (Manuelle)
+Chaque sauvegarde étant un dossier standard, vous pouvez simplement l'ouvrir et copier-coller manuellement un fichier spécifique si vous n'avez pas besoin de tout restaurer.
+
+---
+
+## ✨ Points Forts Techniques
+
+*   🚀 **Multi-threading** : Copie 16 fichiers à la fois pour une vitesse maximale.
+*   🛡️ **Auto-vérification** : Teste l'espace disque libre avant de commencer.
+*   📝 **Journalisation** : Un fichier `backup.log` est généré pour chaque opération.
+*   📦 **Autonomie** : Chaque dossier de sauvegarde contient son propre outil de restauration.
+
+---
+
+## 🛠️ Dépannage
+
+*   **Erreur d'espace** : Si le message "Espace insuffisant" apparaît, utilisez `manage.bat` pour supprimer de vieilles sauvegardes.
+*   **Fichiers verrouillés** : Si certains fichiers ne se copient pas, fermez les applications mentionnées dans la console avant de valider.
+*   **Accents** : Si vous voyez des caractères bizarres, lancez bien les fichiers `.bat` et non les `.ps1`.
