@@ -169,6 +169,7 @@ if ($totalSize -gt ($Config.MaxBackupSizeGB * 1GB)) { Write-Host "ERREUR : Taill
 $DestRoot = if (Test-Path $Config.PrimaryDestination.Split("\")[0]) { $Config.PrimaryDestination } else { $Config.FallbackDestination }
 $dest = "$DestRoot\$((Get-Date).ToString('yyyy-MM-dd_HH-mm-ss'))"
 New-Item $dest -ItemType Directory -Force | Out-Null
+$loggedUser | Set-Content "$dest\user.txt" -Encoding UTF8
 Write-Host "`n>>> Copie vers $dest..." -ForegroundColor Yellow
 foreach ($folderName in $folders.Keys) {
     Write-Host " - $folderName" -ForegroundColor Gray

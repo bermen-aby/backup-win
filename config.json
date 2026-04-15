@@ -1,8 +1,8 @@
 {
-    "MaxBackupSizeGB":  15,
-    "MaxBackupsToKeep":  8,
-    "PrimaryDestination":  "E:\\Sauvegarde Test",
-    "FallbackDestination":  "C:\\Sauvegarde_Secours",
+    "MaxBackupSizeGB":  50,
+    "MaxBackupsToKeep":  5,
+    "PrimaryDestination":  "E:\\Backup-Windows",
+    "FallbackDestination":  "C:\\Backup-Windows",
     "ProcessCheckList":  [
                              "chrome",
                              "firefox",
@@ -14,11 +14,11 @@
     "SourceFolders":  {
                           "Images":  {
                                          "Path":  "C:\\Users\\Bermen\\Pictures",
-                                         "Enabled":  false
+                                         "Enabled":  true
                                      },
                           "Videos":  {
                                          "Path":  "C:\\Users\\Bermen\\Videos",
-                                         "Enabled":  false
+                                         "Enabled":  true
                                      },
                           "Bureau":  {
                                          "Path":  "C:\\Users\\Bermen\\Desktop",
@@ -26,7 +26,7 @@
                                      },
                           "Telechargements":  {
                                                   "Path":  "C:\\Users\\Bermen\\Downloads",
-                                                  "Enabled":  false
+                                                  "Enabled":  true
                                               },
                           "Signatures":  {
                                              "Path":  "C:\\Users\\Bermen\\AppData\\Roaming\\Microsoft\\Signatures",
